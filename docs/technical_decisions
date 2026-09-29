@@ -1,0 +1,55 @@
+# Decisões técnicas
+
+Principais decisões de arquitetura do projeto: contexto, alternativas avaliadas, trade-offs e o que mudaria num ambiente corporativo.
+
+---
+
+## ADR-01. Plataforma: Databricks Free Edition e suas restrições
+
+**Contexto.** O projeto roda por cerca de 8 semanas, sem orçamento de nuvem.
+
+**Alternativas.** Azure Databricks com créditos limitados; modelo híbrido (Free Edition para desenvolvimento e Azure para testes de compute).
+
+**Decisão.** Free Edition para todo o projeto.
+
+**Trade-offs aceitos.**
+- Só existe compute serverless. A escolha entre cluster all-purpose, job compute e políticas de cluster fica fora do escopo prático.
+- Há um único workspace por conta, sem console de conta. O isolamento entre ambientes e os grupos de acesso precisam ser resolvidos dentro do workspace (ver ADR-02).
+- A cota diária de uso limita o volume de dados. O desenvolvimento usa amostras, e a carga histórica é processada dia a dia.
+
+**Em ambiente corporativo.** Um workspace por ambiente, job compute ou serverless com políticas de custo, e grupos gerenciados pelo identity provider da empresa.
+
+---
+
+## ADR-02. Isolamento de ambientes por catálogo, com o catálogo injetado por parâmetro
+
+**Contexto.** O mesmo código precisa rodar em desenvolvimento e produção. A Free Edition oferece um único workspace.
+
+**Alternativas.**
+- Um workspace por ambiente: é o padrão de mercado, mas não está disponível aqui.
+- Um catálogo único, com schemas por ambiente (`dev_bronze`, `prod_bronze`): mistura ambientes na mesma fronteira de governança.
+- Um catálogo único, sem separação: dev escreveria sobre os dados de prod.
+
+**Decisão.** Um catálogo por ambiente (`fintech_dev`, `fintech_prod`), todos com a mesma estrutura de schemas. Nenhum código tem o catálogo fixo: ele chega por parâmetro (widget no notebook e, na etapa de CI/CD, variável de bundle por target) e é resolvido com `IDENTIFIER(:catalogo)`.
+
+**Motivo.** No Unity Catalog, o catálogo é a fronteira natural de governança. Permissões por ambiente viram um `GRANT` por catálogo, e o código fica agnóstico de ambiente, pronto para ser publicado por bundles sem alteração.
+
+**Trade-offs aceitos.**
+- O isolamento é **lógico**, não físico: dev e prod compartilham workspace, metastore e compute.
+- Todo SQL precisa usar nomes parametrizados, o que exige mais disciplina no código.
+
+**Em ambiente corporativo.** O catálogo por ambiente continua válido, mas cada catálogo fica vinculado ao seu workspace (workspace-catalog binding), o que garante o isolamento físico.
+
+---
+
+## ADR-03. Notebooks versionados em formato source (`.sql` / `.py`)
+
+**Contexto.** O workspace salvava notebooks no Git como `.ipynb` por padrão.
+
+**Alternativas.** Manter `.ipynb`.
+
+**Decisão.** Formato source como padrão.
+
+**Motivo.** A revisão por Pull Request fica legível, com um diff linha a linha em vez de JSON com metadados. O formato também integra melhor com bundles e CI, e segue o fluxo de engenharia usado em times que revisam código.
+
+**Trade-off aceito.** O GitHub não renderiza células nem saídas. As evidências de execução (métricas, prints de plano e de linhagem) ficam no README e em `docs/`.
