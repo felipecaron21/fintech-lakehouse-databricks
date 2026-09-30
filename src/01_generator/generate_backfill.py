@@ -292,3 +292,74 @@ print(df_conferencia_users.count())
 # MAGIC   - Nome coerente com o `gender`; e-mail derivado do nome + `id` (único por cliente).
 # MAGIC - **Gravação:** CSV com cabeçalho, `coalesce(1)` (um único arquivo) e `overwrite`, em `landing/raw_files/clientes/backfill/`.
 # MAGIC - **Validação:** releitura com 2.000 linhas e 17 colunas, sem deslocamento de colunas.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # cards_data
+
+# COMMAND ----------
+
+schema_cards = """
+    id STRING,
+    client_id STRING,
+    card_brand STRING,
+    card_type STRING,
+    card_number STRING,
+    expires STRING,
+    cvv STRING,
+    has_chip STRING,
+    num_cards_issued STRING,
+    credit_limit STRING,
+    acct_open_date STRING,
+    year_pin_last_changed STRING,
+    card_on_dark_web STRING
+"""
+
+df_cards_data = (spark.read
+                 .schema(schema_cards)
+                 .option("header", True)
+                 .csv(f'/Volumes/{catalogo}/landing/raw_files/kaggle/cards_data.csv/')
+                
+)
+
+
+df_cards_data.printSchema()
+print(df_cards_data.count())
+
+# COMMAND ----------
+
+(df_cards_data
+    .coalesce(1)
+    .write
+    .mode("overwrite")
+    .option("header", True)
+    .csv(f'/Volumes/{catalogo}/landing/raw_files/cartoes/backfill/')
+ )
+
+# COMMAND ----------
+
+display(dbutils.fs.ls(f'/Volumes/{catalogo}/landing/raw_files/cartoes/backfill/'))
+
+# COMMAND ----------
+
+df_conferencia_cards = (spark.read
+                        .option("header", True)
+                        .csv(f'/Volumes/{catalogo}/landing/raw_files/cartoes/backfill/')
+                        )
+
+df_conferencia_cards.printSchema()
+
+display(df_conferencia_cards.limit(20))
+print(df_conferencia_cards.count())
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC ### Resultado : cartões do backfill
+# MAGIC
+# MAGIC - **Leitura:** schema explícito com as 13 colunas originais como `STRING` (o gerador não interpreta o dado).
+# MAGIC - **Gravação:** CSV com cabeçalho, `coalesce(1)` (um único arquivo) e `overwrite`, em `landing/raw_files/cartoes/backfill/`.
+# MAGIC - **Validação:** releitura com 6.146 linhas e 13 colunas.
+# MAGIC - **Dados sensíveis (PCI DSS):** `card_number` (PAN) e `cvv` chegam à landing exatamente como na fonte. O tratamento (mascarar o PAN e descartar o CVV antes de persistir) será decidido na ingestão, na Etapa 2.
