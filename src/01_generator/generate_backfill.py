@@ -2,10 +2,22 @@
 # /// script
 # [tool.databricks.environment]
 # environment_version = "6"
+# dependencies = [
+#   "faker",
+# ]
 # ///
+# MAGIC %pip install faker==40.40.0
+
+# COMMAND ----------
+
 dbutils.widgets.text("catalogo", "fintech_dev")
 catalogo = dbutils.widgets.get("catalogo")
 print(catalogo)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC #transactions_data
 
 # COMMAND ----------
 
@@ -149,3 +161,134 @@ display(dbutils.fs.ls(f"/Volumes/{catalogo}/landing/raw_files/transacoes/backfil
 # MAGIC - **Estrutura do JSON:** nomes originais do Kaggle, com os dados do estabelecimento aninhados num objeto `merchant` (`merchant_id`, `merchant_city`, `merchant_state`, `zip`, `mcc`).
 # MAGIC - **Gravação:** `repartition("ano")` + `partitionBy("ano")` + `mode("overwrite")` em `landing/raw_files/transacoes/backfill/`. Resultado: uma pasta `ano=XXXX/` por ano, com **um único arquivo** JSON Lines em cada uma. O `overwrite` torna o backfill idempotente.
 # MAGIC - **Validação:** releitura da pasta com contagem por ano. Os 7 anos batem exatamente com a origem (9.351.849 transações no total).
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # users_data
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ###1. Definindo schema e df
+
+# COMMAND ----------
+
+schema_users = """
+    id STRING,
+    current_age STRING,
+    retirement_age STRING,
+    birth_year STRING,
+    birth_month STRING,
+    gender STRING,
+    address STRING,
+    latitude STRING,
+    longitude STRING,
+    per_capita_income STRING,
+    yearly_income STRING,
+    total_debt STRING,
+    credit_score STRING,
+    num_credit_cards STRING
+"""
+
+df_users_data = (spark.read
+                .schema(schema_users)
+                .option("header", True)
+                .csv(f'/Volumes/{catalogo}/landing/raw_files/kaggle/users_data.csv/')
+)
+
+print(df_users_data.count())
+
+# COMMAND ----------
+
+from faker import Faker
+
+fake = Faker("en_US")
+
+# 1. Spark → Python: id e gênero de cada cliente
+clientes = [(linha["id"], linha["gender"])
+            for linha in df_users_data.select("id", "gender").collect()]
+
+# 2. Identidade sintética por cliente, com semente = id
+#    Ordem fixa das chamadas: ssn → primeiro nome → sobrenome → domínio do e-mail
+identidades = []
+for id_cliente, genero in clientes:
+    fake.seed_instance(int(id_cliente))
+
+    ssn = fake.ssn()
+    primeiro_nome = fake.first_name_female() if genero == "Female" else fake.first_name_male()
+    sobrenome = fake.last_name()
+    dominio = fake.free_email_domain()          # ex.: gmail.com, yahoo.com, hotmail.com
+
+    identidades.append({
+        "id": id_cliente,
+        "ssn": ssn,
+        "name": f"{primeiro_nome} {sobrenome}",
+        "email": f"{primeiro_nome}.{sobrenome}{id_cliente}@{dominio}".lower(),
+    })
+
+# 3. Python → Spark, e join com os clientes originais
+df_identidades = spark.createDataFrame(identidades)
+
+df_users_backfill = df_users_data.join(df_identidades, on="id", how="left")
+
+display(df_users_backfill.select("id", "gender", "name", "ssn", "email").limit(10))
+print(df_users_backfill.count())
+
+# COMMAND ----------
+
+(df_users_backfill
+    .select("id", 
+            "name", 
+            "ssn", 
+            "email", 
+            "current_age", 
+            "retirement_age", 
+            "birth_year", 
+            "birth_month", 
+            "gender", 
+            "address",
+            "latitude",
+            "longitude",
+            "per_capita_income",
+            "yearly_income",
+            "total_debt",
+            "credit_score",
+            "num_credit_cards",
+            )
+    .coalesce(1)
+    .write
+    .mode("overwrite")
+    .option("header", True)
+    .csv(f'/Volumes/{catalogo}/landing/raw_files/clientes/backfill/')
+ )
+
+
+
+# COMMAND ----------
+
+display(dbutils.fs.ls(f'/Volumes/{catalogo}/landing/raw_files/clientes/backfill/'))
+
+# COMMAND ----------
+
+df_conferencia_users = (spark.read
+    .option("header", True)
+    .csv(f'/Volumes/{catalogo}/landing/raw_files/clientes/backfill/'))
+
+df_conferencia_users.printSchema()
+display(df_conferencia_users.limit(10))
+print(df_conferencia_users.count())
+
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Resultado : clientes do backfill
+# MAGIC
+# MAGIC - **Leitura:** schema explícito com as 14 colunas originais como `STRING` (o gerador não interpreta o dado).
+# MAGIC - **Identidade sintética (ADR-05):** `ssn`, `name` e `email` gerados com Faker `en_US` 40.40.0 (versão fixada).
+# MAGIC   - **Semente = `id` do cliente:** a mesma pessoa recebe sempre a mesma identidade, em qualquer execução.
+# MAGIC   - **Ordem fixa das chamadas:** `ssn` → primeiro nome → sobrenome → domínio do e-mail. Mudar a ordem muda o resultado.
+# MAGIC   - Nome coerente com o `gender`; e-mail derivado do nome + `id` (único por cliente).
+# MAGIC - **Gravação:** CSV com cabeçalho, `coalesce(1)` (um único arquivo) e `overwrite`, em `landing/raw_files/clientes/backfill/`.
+# MAGIC - **Validação:** releitura com 2.000 linhas e 17 colunas, sem deslocamento de colunas.

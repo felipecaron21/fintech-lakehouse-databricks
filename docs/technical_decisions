@@ -15,7 +15,7 @@ Principais decisões de arquitetura do projeto: contexto, alternativas avaliadas
 **Trade-offs aceitos.**
 - Só existe compute serverless. A escolha entre cluster all-purpose, job compute e políticas de cluster fica fora do escopo prático.
 - Há um único workspace por conta, sem console de conta. O isolamento entre ambientes e os grupos de acesso precisam ser resolvidos dentro do workspace (ver ADR-02).
-- A cota diária de uso limita o volume de dados. O desenvolvimento usa amostras, e a carga histórica é processada dia a dia.
+- A cota diária de uso limita o volume processado por dia. Se ela for atingida, o backfill pode ser carregado um ano por vez (ver ADR-04).
 
 **Em ambiente corporativo.** Um workspace por ambiente, job compute ou serverless com políticas de custo, e grupos gerenciados pelo identity provider da empresa.
 
@@ -69,6 +69,8 @@ Principais decisões de arquitetura do projeto: contexto, alternativas avaliadas
 - **Backfill:** 2010-01-01 a 2016-12-31 (7 anos completos, ~9,35 milhões de transações, ~70% da base).
 - **Incremental:** a partir de 2017-01-01 (D0), um dia do calendário por execução do gerador, com todas as transações reais daquele dia.
 - O backfill entra pela **mesma porta** da carga diária: arquivos na landing, processados pelo mesmo Auto Loader.
+- O backfill chega em **um arquivo por ano** (7 arquivos, ~1,3 milhão de transações cada). Alternativas avaliadas: um arquivo por dia (~2.557 arquivos pequenos, *small files problem*), por mês (~84) e arquivo único (~9,35 milhões de linhas, sem reprocessamento parcial). Por ano equilibra número de arquivos, tamanho e a possibilidade de reprocessar ou carregar um período de cada vez.
+- As transações **mantêm as datas originais** do dataset (o D0 é literalmente 2017-01-01). Deslocar para o presente exigiria deslocar todas as datas de todos os arquivos (validade e abertura de cartões, nascimento e idade de clientes); qualquer data esquecida geraria inconsistências, como compras feitas com cartões já vencidos.
 
 **Motivo.**
 - Preserva o comportamento real (dia da semana, sazonalidade, horário), o que dá sentido às métricas temporais da Gold.
@@ -83,3 +85,33 @@ Principais decisões de arquitetura do projeto: contexto, alternativas avaliadas
 - O volume dos arquivos diários varia (~3.700 transações por dia, em média), como num ambiente real.
 
 **Em ambiente corporativo.** O backfill viria de uma extração do sistema legado (dump do banco ou export do core bancário), normalmente particionada por período e carregada em janelas para não sobrecarregar a origem nem o cluster.
+
+---
+
+## ADR-05. Fintech americana, com dados de identidade sintéticos para a governança
+
+**Contexto.** Os dados do Kaggle são americanos: endereços e coordenadas de clientes nos EUA, estabelecimentos em estados americanos e valores em dólar. O guia original propunha "abrasileirar" os clientes (CPF, nome, e-mail, cidade e UF com Faker `pt_BR`). A base original quase não tem dados pessoais identificáveis (PII): não há nome, documento nem e-mail. Sem eles, a etapa de governança (máscaras de coluna e tags de PII) teria pouco a proteger.
+
+**Alternativas.**
+- Abrasileirar identidade e localização: clientes em cidades brasileiras fazendo compras presenciais nos EUA (incoerência geográfica), e o Faker gera cidades inventadas, sem relação com a UF.
+- Abrasileirar só a identidade (CPF, nome, e-mail), mantendo o endereço americano: um cliente com CPF morando nos EUA.
+- Não acrescentar nada: 100% fiel à fonte, mas a governança fica sem um identificador para mascarar.
+
+**Decisão.** Tratar o projeto como uma **fintech americana**. O gerador acrescenta aos clientes três campos sintéticos no padrão dos EUA, com Faker `en_US`: **SSN** (Social Security Number, o documento de identificação americano), **nome** e **e-mail**. Todas as colunas originais são mantidas.
+
+A identidade é gerada de forma **determinística**, para que a mesma pessoa receba sempre os mesmos dados em qualquer execução (backfill reexecutado ou gerador diário):
+- **Semente = `id` do cliente**, com uma ordem fixa de chamadas (`ssn` → primeiro nome → sobrenome → domínio do e-mail).
+- **Versão do Faker fixada** (`faker==40.40.0`): uma versão nova poderia gerar outra pessoa para a mesma semente, e o SCD2 abriria versões falsas para todos os clientes.
+- Nome coerente com o `gender` do cliente; e-mail derivado do nome + `id`, garantindo unicidade.
+- **SSN e nome são imutáveis** (premissa: mudança de nome, por exemplo por casamento, fica fora do escopo). E-mail, endereço, renda e limite podem mudar e alimentam o SCD2.
+
+**Motivo.**
+- Coerência total: clientes, estabelecimentos, endereços e moeda no mesmo país.
+- A governança ganha um caso realista: o SSN é um dos dados pessoais mais sensíveis nos EUA, e mascará-lo por perfil de acesso é um exemplo direto de uso de máscara de coluna.
+- A narrativa se alinha com o objetivo de buscar vagas internacionais.
+
+**Trade-offs aceitos.**
+- O projeto se distancia da narrativa do mercado brasileiro prevista no guia (CPF, UF).
+- Os nomes de colunas da dimensão de clientes mudam em relação ao guia (`ssn` no lugar de `cpf`; sem `uf`).
+
+**Em ambiente corporativo.** Dados de identificação viriam do cadastro (KYC) da própria fintech. Em ambientes de desenvolvimento, é comum usar dados sintéticos ou mascarados, justamente para não expor PII real fora de produção.
