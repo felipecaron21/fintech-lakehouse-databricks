@@ -201,31 +201,14 @@ print(df_users_data.count())
 
 # COMMAND ----------
 
-from faker import Faker
-
-fake = Faker("en_US")
+from identity import gerar_identidade
 
 # 1. Spark → Python: id e gênero de cada cliente
 clientes = [(linha["id"], linha["gender"])
             for linha in df_users_data.select("id", "gender").collect()]
 
-# 2. Identidade sintética por cliente, com semente = id
-#    Ordem fixa das chamadas: ssn → primeiro nome → sobrenome → domínio do e-mail
-identidades = []
-for id_cliente, genero in clientes:
-    fake.seed_instance(int(id_cliente))
-
-    ssn = fake.ssn()
-    primeiro_nome = fake.first_name_female() if genero == "Female" else fake.first_name_male()
-    sobrenome = fake.last_name()
-    dominio = fake.free_email_domain()          # ex.: gmail.com, yahoo.com, hotmail.com
-
-    identidades.append({
-        "id": id_cliente,
-        "ssn": ssn,
-        "name": f"{primeiro_nome} {sobrenome}",
-        "email": f"{primeiro_nome}.{sobrenome}{id_cliente}@{dominio}".lower(),
-    })
+# 2. Identidade sintética por cliente (regras no módulo identity.py, ADR-05)
+identidades = [gerar_identidade(id_cliente, genero) for id_cliente, genero in clientes]
 
 # 3. Python → Spark, e join com os clientes originais
 df_identidades = spark.createDataFrame(identidades)
@@ -286,10 +269,7 @@ print(df_conferencia_users.count())
 # MAGIC ### Resultado : clientes do backfill
 # MAGIC
 # MAGIC - **Leitura:** schema explícito com as 14 colunas originais como `STRING` (o gerador não interpreta o dado).
-# MAGIC - **Identidade sintética (ADR-05):** `ssn`, `name` e `email` gerados com Faker `en_US` 40.40.0 (versão fixada).
-# MAGIC   - **Semente = `id` do cliente:** a mesma pessoa recebe sempre a mesma identidade, em qualquer execução.
-# MAGIC   - **Ordem fixa das chamadas:** `ssn` → primeiro nome → sobrenome → domínio do e-mail. Mudar a ordem muda o resultado.
-# MAGIC   - Nome coerente com o `gender`; e-mail derivado do nome + `id` (único por cliente).
+# MAGIC - **Identidade sintética (ADR-05):** `ssn`, `name` e `email` gerados pela função `gerar_identidade` do módulo `identity.py`, compartilhado com o gerador diário (Faker `en_US` 40.40.0, semente = `id` do cliente, ordem fixa de chamadas).
 # MAGIC - **Gravação:** CSV com cabeçalho, `coalesce(1)` (um único arquivo) e `overwrite`, em `landing/raw_files/clientes/backfill/`.
 # MAGIC - **Validação:** releitura com 2.000 linhas e 17 colunas, sem deslocamento de colunas.
 
