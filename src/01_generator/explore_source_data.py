@@ -293,3 +293,31 @@ display(df_fraud_rotulos_orfaos.count())
 # MAGIC - **Distribuição:** 8.901.631 `No` e 13.332 `Yes`. **Taxa de fraude ≈ 0,15%** (1 a cada ~670) — desbalanceamento de classes típico de fraude.
 # MAGIC - **Impacto na modelagem:** `flag_fraude` na `fato_transacoes` com três estados: `true`, `false` e `null` (**não avaliada**). Tratar `null` como `false` aumentaria o denominador e subestimaria a taxa de fraude em cerca de um terço.
 # MAGIC - **Hipótese a validar:** o recorte dos rótulos é temporal ou aleatório.
+
+# COMMAND ----------
+
+from pyspark.sql import functions as F
+
+df_resultado = (
+    df_transactions_data
+    .join(df_fraud_labels, df_transactions_data["id"] == df_fraud_labels["transaction_id"], "left")
+    .groupBy(F.substring("date", 1, 4).alias("ano"))
+    .agg(
+        F.count("*").alias("transacoes_total"),
+        F.count("is_fraud").alias("transacoes_rotuladas")
+    )
+    .orderBy("ano")
+)
+
+display(df_resultado)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC ### Validação : cobertura dos rótulos de fraude por ano
+# MAGIC
+# MAGIC - Join `left` entre transações e rótulos, agrupado por ano (`count(*)` x `count(is_fraud)`).
+# MAGIC - **Resultado:** ~67% das transações têm rótulo em **todos os anos**, de 2010 a 2019.
+# MAGIC - **Conclusão:** a amostra de rótulos é **aleatória**, e não temporal. A hipótese de um corte por período foi descartada.
+# MAGIC - **Consequência:** o corte entre backfill e incremental pode ficar em qualquer data sem prejudicar a análise de fraude. Corte definido: backfill 2010–2016 (~70%), incremental a partir de 2017-01-01 (ver ADR-04).

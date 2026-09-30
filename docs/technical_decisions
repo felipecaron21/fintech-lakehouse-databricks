@@ -53,3 +53,33 @@ Principais decisões de arquitetura do projeto: contexto, alternativas avaliadas
 **Motivo.** A revisão por Pull Request fica legível, com um diff linha a linha em vez de JSON com metadados. O formato também integra melhor com bundles e CI, e segue o fluxo de engenharia usado em times que revisam código.
 
 **Trade-off aceito.** O GitHub não renderiza células nem saídas. As evidências de execução (métricas, prints de plano e de linhagem) ficam no README e em `docs/`.
+
+---
+
+## ADR-04. Simulação da carga: backfill histórico + incremental diário, com mapeamento de calendário
+
+**Contexto.** O dataset do Kaggle é uma foto estática (2010-01 a 2019-10, 13,3 milhões de transações). O projeto precisa simular uma fintech em operação, com arquivos chegando todo dia. Um lakehouse real raramente começa vazio: ele migra o legado e depois passa a receber a carga diária.
+
+**Alternativas.**
+- Começar do zero, só com carga diária: pouco realista, e a Gold fica quase vazia por muito tempo.
+- Fatia fixa por dia (N transações sequenciais por arquivo): simples, mas elimina a sazonalidade e o sentido do horário.
+- Backfill + incremental, com cada dia simulado correspondendo a um dia real do histórico.
+
+**Decisão.**
+- **Backfill:** 2010-01-01 a 2016-12-31 (7 anos completos, ~9,35 milhões de transações, ~70% da base).
+- **Incremental:** a partir de 2017-01-01 (D0), um dia do calendário por execução do gerador, com todas as transações reais daquele dia.
+- O backfill entra pela **mesma porta** da carga diária: arquivos na landing, processados pelo mesmo Auto Loader.
+
+**Motivo.**
+- Preserva o comportamento real (dia da semana, sazonalidade, horário), o que dá sentido às métricas temporais da Gold.
+- A Gold tem histórico suficiente desde o início para análises mensais e para o SCD2.
+- Um único caminho de ingestão: a mesma linhagem, as mesmas regras de qualidade e o mesmo código para o histórico e para o incremental.
+- Corte em fim de ano: fronteira limpa e fácil de explicar.
+
+**Validação que sustentou a decisão.** Os rótulos de fraude cobrem ~67% das transações em **todos** os anos (amostra aleatória, não temporal). Qualquer ponto de corte preserva a capacidade de analisar fraude.
+
+**Trade-offs aceitos.**
+- Volume alto no backfill (~9,35 milhões de linhas nas três camadas), com risco de atingir a cota diária da Free Edition. Mitigação: processar o backfill em lotes, se necessário.
+- O volume dos arquivos diários varia (~3.700 transações por dia, em média), como num ambiente real.
+
+**Em ambiente corporativo.** O backfill viria de uma extração do sistema legado (dump do banco ou export do core bancário), normalmente particionada por período e carregada em janelas para não sobrecarregar a origem nem o cluster.
