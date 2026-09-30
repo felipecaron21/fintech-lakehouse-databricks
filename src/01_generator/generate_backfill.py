@@ -343,3 +343,57 @@ print(df_conferencia_cards.count())
 # MAGIC - **Gravação:** CSV com cabeçalho, `coalesce(1)` (um único arquivo) e `overwrite`, em `landing/raw_files/cartoes/backfill/`.
 # MAGIC - **Validação:** releitura com 6.146 linhas e 13 colunas.
 # MAGIC - **Dados sensíveis (PCI DSS):** `card_number` (PAN) e `cvv` chegam à landing exatamente como na fonte. O tratamento (mascarar o PAN e descartar o CVV antes de persistir) será decidido na ingestão, na Etapa 2.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # Preparando fonte dos arquivos diários
+
+# COMMAND ----------
+
+from pyspark.sql import functions as F
+
+df_database_daily_transactions = (
+    df_transactions_data
+    .filter(F.col("date") >= "2017-01-01")
+    .withColumn("month_year", F.substring("date", 1, 7))
+)
+
+(df_database_daily_transactions
+    .repartition("month_year")
+    .write
+    .mode("overwrite")
+    .partitionBy("month_year")
+    .parquet(f'/Volumes/{catalogo}/landing/raw_files/kaggle/prepared/transacoes_incremental/')
+ )
+
+# COMMAND ----------
+
+pastas = dbutils.fs.ls(f'/Volumes/{catalogo}/landing/raw_files/kaggle/prepared/transacoes_incremental/')
+display(pastas)
+print(len([p for p in pastas if p.name.startswith("month_year")]))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Validando o resultado da pasta /prepared
+
+# COMMAND ----------
+
+df_conferencia_transactions_daily = (spark.read
+                                     .parquet(f'/Volumes/{catalogo}/landing/raw_files/kaggle/prepared/')
+)
+
+display(df_conferencia_transactions_daily.count())
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Resultado : preparação da fonte do incremental
+# MAGIC
+# MAGIC - **Objetivo:** evitar que o gerador diário leia o CSV inteiro do Kaggle (13,3 mi de linhas, ~12 s) para usar ~4 mil linhas por dia.
+# MAGIC - **O que foi feito:** as transações a partir de 2017-01-01 foram gravadas uma única vez em **Parquet**, particionadas por `ano_mes` (34 partições, de 2017-01 a 2019-10), com um arquivo por partição.
+# MAGIC - **Destino:** `landing/raw_files/kaggle/prepared/transacoes_incremental/`. É matéria-prima do simulador, fora das pastas lidas pelo Auto Loader.
+# MAGIC - **Tipos:** todas as colunas continuam `STRING`; os valores chegam intactos à Silver.
+# MAGIC - **Validação:** 3.954.066 linhas (13.305.915 do Kaggle − 9.351.849 do backfill).
+# MAGIC - **Ganho esperado:** o gerador diário lê só a partição do mês (*partition pruning*) e filtra o dia dentro dela.
