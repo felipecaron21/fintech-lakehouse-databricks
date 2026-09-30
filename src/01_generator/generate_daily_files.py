@@ -29,25 +29,8 @@ if not (data_min <= data <= data_max):
 
 # COMMAND ----------
 
-schema_transactions = """
-    id STRING,
-    date STRING,
-    client_id STRING,
-    card_id STRING,
-    amount STRING,
-    use_chip STRING,
-    merchant_id STRING,
-    merchant_city STRING,
-    merchant_state STRING,
-    zip STRING,
-    mcc STRING,
-    errors STRING
-"""
-
 df_transactions_data = (spark.read
-                        .schema(schema_transactions)
-                        .option("header", True)
-                        .csv(f'/Volumes/{catalogo}/landing/raw_files/kaggle/transactions_data.csv/')
+                        .parquet(f'/Volumes/{catalogo}/landing/raw_files/kaggle/prepared/transacoes_incremental/')
 )
 
 display(df_transactions_data.limit(20))
@@ -56,8 +39,11 @@ display(df_transactions_data.limit(20))
 
 from pyspark.sql import functions as F
 
+var_month = data_simulada[:7]
+
 df_transactions_data_file = (
     df_transactions_data
+        .filter(F.col("month_year") == var_month)
         .filter(F.substring("date", 1, 10) == data_simulada)
 )
 

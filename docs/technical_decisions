@@ -115,3 +115,39 @@ A identidade é gerada de forma **determinística**, para que a mesma pessoa rec
 - Os nomes de colunas da dimensão de clientes mudam em relação ao guia (`ssn` no lugar de `cpf`; sem `uf`).
 
 **Em ambiente corporativo.** Dados de identificação viriam do cadastro (KYC) da própria fintech. Em ambientes de desenvolvimento, é comum usar dados sintéticos ou mascarados, justamente para não expor PII real fora de produção.
+
+---
+
+## ADR-06. Fonte do gerador diário pré-particionada por mês em Parquet
+
+**Contexto.** O gerador diário precisa das transações de um único dia (~4 mil linhas). A fonte original é o `transactions_data.csv` do Kaggle (13,3 milhões de linhas, ~1,2 GB), sem índice nem partição. Para achar um dia, o Spark precisa ler o arquivo inteiro a cada execução: ~12 s, com 99,97% do que é lido sendo descartado. O custo se repete em toda execução do job e se multiplica quando vários dias são simulados em sequência.
+
+**Alternativas.**
+- Aceitar a leitura completa do CSV a cada dia: nenhuma peça nova, e 12 s são irrelevantes num job diário (otimização prematura).
+- Particionar por **dia**: ~1.030 pastas com ~3.700 linhas cada, o que cria o *small files problem*.
+- Particionar por **ano**: 3 pastas com ~1,3 milhão de linhas cada, com ganho pequeno.
+- Particionar por **mês**.
+
+**Decisão.** Uma preparação única, no `generate_backfill`, grava as transações do período incremental (2017-01-01 a 2019-10-31) em **Parquet**, particionadas por `month_year` (34 partições, um arquivo por partição), em `landing/raw_files/kaggle/prepared/transacoes_incremental/`. O gerador diário lê só a partição do mês da `data_simulada` (*partition pruning*) e filtra o dia dentro dela.
+
+**Motivo.**
+- Mês equilibra o número de pastas (34) e o tamanho de cada uma (~115 mil linhas).
+- Parquet é colunar e comprimido; como a fonte é gravada uma vez e nunca alterada, as garantias do Delta (ACID, versões) não são necessárias aqui.
+- Demonstra, com medição de antes e depois, o efeito do *partition pruning*.
+
+**Validação.** 3.954.066 linhas na fonte preparada = 13.305.915 (Kaggle) − 9.351.849 (backfill). Nenhuma transação perdida ou duplicada.
+
+**Resultado medido** (dia 2017-01-01, 3.989 transações, mesmo resultado nas duas leituras):
+
+| Leitura | Linhas lidas | Tempo |
+|---|---|---|
+| CSV original do Kaggle | 13,3 milhões (arquivo inteiro) | ~12 s |
+| Parquet particionado por mês | ~115 mil (só a partição do mês) | ~1,1 s |
+
+Redução de ~11x no tempo de leitura por execução do gerador diário.
+
+**Trade-offs aceitos.**
+- Uma etapa de preparação a mais, e uma cópia intermediária dos dados para manter.
+- A otimização acontece no simulador, e não no pipeline; as otimizações do pipeline ficam para a etapa de performance.
+
+**Em ambiente corporativo.** O equivalente seria a origem já entregar extrações por período, ou uma tabela Delta de staging com *Liquid Clustering* pela data, que o Databricks recomenda no lugar do particionamento tradicional na maioria dos casos.
