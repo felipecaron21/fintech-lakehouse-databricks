@@ -190,6 +190,10 @@ Redução de ~11x no tempo de leitura por execução do gerador diário.
 - As mudanças de cada dia são sorteadas por uma função com **semente igual à data**, usando um sorteador próprio (`random.Random(semente)`), e não o `random` global.
 - A lista de clientes é **ordenada pelo `id`** antes do sorteio, porque o `collect()` do Spark não garante ordem.
 
+**Aplicação aos cartões.** O mesmo padrão vale para as mudanças de cartões (SCD1 na Gold): mesmo sem histórico, um registro montado a partir do Kaggle sobrescreveria um limite já alterado com o valor original. Duas diferenças:
+- A semente do sorteio dos cartões é a data **mais um deslocamento fixo**, para que os dias com mudanças de cartões não coincidam com os de clientes sem motivo de negócio.
+- O grupo de mudança é sorteado **com pesos** (limite 45%, senha 27%, reemissão 25%, vazamento na dark web 3%). Com pesos iguais, ~56% dos cartões terminariam marcados como vazados até 2019-10; com os pesos, ~9%.
+
 **Motivo.**
 - O registro de cada dia reflete todas as mudanças anteriores, como num sistema de origem real.
 - Idempotente e independente da ordem de execução: regenerar qualquer dia produz sempre o mesmo arquivo.

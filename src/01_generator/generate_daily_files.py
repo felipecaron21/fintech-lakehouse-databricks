@@ -166,3 +166,59 @@ if mudados_no_dia:
     display(df_clientes_dia)
 else:
     print("Dia sem mudanças de clientes: nenhum arquivo gravado.")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mundanças de cartões
+
+# COMMAND ----------
+
+# --- Mudanças de cartões do dia (ADR-08, SCD1 na Gold) ---
+from card_changes import reconstruir_estado as reconstruir_estado_cartoes
+
+# 1. Estado inicial no D0: cartões do Kaggle, como chegaram (tudo como texto)
+schema_cards = """
+    id STRING, client_id STRING, card_brand STRING, card_type STRING,
+    card_number STRING, expires STRING, cvv STRING, has_chip STRING,
+    num_cards_issued STRING, credit_limit STRING, acct_open_date STRING,
+    year_pin_last_changed STRING, card_on_dark_web STRING
+"""
+
+df_cards_kaggle = (spark.read
+    .schema(schema_cards)
+    .option("header", True)
+    .csv(f"/Volumes/{catalogo}/landing/raw_files/kaggle/cards_data.csv"))
+
+cartoes_d0 = {linha["id"]: linha.asDict() for linha in df_cards_kaggle.collect()}
+
+# 2. Replay do D0 até a data simulada (só em memória)
+estado_cartoes, cartoes_mudados_no_dia = reconstruir_estado_cartoes(data, cartoes_d0)
+print(f"{data_simulada}: {len(cartoes_mudados_no_dia)} cartões com mudança")
+
+# 3. Grava o registro completo dos cartões que mudaram hoje (mesma ordem de colunas do backfill)
+colunas_cartoes = [
+    "id", "client_id", "card_brand", "card_type", "card_number", "expires", "cvv",
+    "has_chip", "num_cards_issued", "credit_limit", "acct_open_date",
+    "year_pin_last_changed", "card_on_dark_web",
+]
+
+if cartoes_mudados_no_dia:
+    registros_do_dia = [estado_cartoes[id_cartao] for id_cartao in cartoes_mudados_no_dia]
+
+    df_cartoes_dia = (spark.createDataFrame(registros_do_dia)
+        .select(*colunas_cartoes)
+        .withColumn("date_partition", F.lit(data_simulada)))
+
+    (df_cartoes_dia
+        .coalesce(1)
+        .write
+        .mode("overwrite")
+        .option("partitionOverwriteMode", "dynamic")
+        .option("header", True)
+        .partitionBy("date_partition")
+        .csv(f"/Volumes/{catalogo}/landing/raw_files/cartoes/daily/"))
+
+    display(df_cartoes_dia)
+else:
+    print("Dia sem mudanças de cartões: nenhum arquivo gravado.")
