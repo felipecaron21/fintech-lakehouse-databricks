@@ -151,3 +151,26 @@ Redução de ~11x no tempo de leitura por execução do gerador diário.
 - A otimização acontece no simulador, e não no pipeline; as otimizações do pipeline ficam para a etapa de performance.
 
 **Em ambiente corporativo.** O equivalente seria a origem já entregar extrações por período, ou uma tabela Delta de staging com *Liquid Clustering* pela data, que o Databricks recomenda no lugar do particionamento tradicional na maioria dos casos.
+
+---
+
+## ADR-07. Idempotência do gerador diário com *dynamic partition overwrite*
+
+**Contexto.** O gerador diário roda um dia por execução e grava as transações em `landing/raw_files/transacoes/daily/`. Ele precisa permitir reexecuções (nova tentativa depois de uma falha, regeneração de um dia) sem duplicar dados e sem apagar os dias já gravados.
+
+**Alternativas.**
+- `overwrite` na pasta raiz: cada execução apagaria todos os dias anteriores.
+- `append`: reexecutar um dia duplicaria as transações daquele dia.
+- Uma pasta por dia, com o caminho montado no código e `overwrite` apontado para ela: funciona, mas cada gravação atende a um único dia.
+- `partitionBy` na raiz com *dynamic partition overwrite*.
+
+**Decisão.** Gravação na raiz `daily/`, com `partitionBy("date_partition")`, `mode("overwrite")` e `.option("partitionOverwriteMode", "dynamic")` **na própria gravação**. O Spark substitui só as partições presentes no DataFrame e preserva as demais.
+
+**Motivo.**
+- Um dia reexecutado é substituído por inteiro; os outros dias ficam intactos.
+- A configuração fica na mesma linha da gravação, e não na sessão. Ela não depende da ordem das células e acompanha o código se ele for copiado. Configurada só na sessão, um esquecimento faria o `overwrite` voltar ao padrão e apagar a pasta inteira, sem erro.
+- O mesmo padrão permite regenerar vários dias numa única gravação, substituindo exatamente aquelas partições.
+
+**Validação.** Três dias gerados (2017-01-01, 2017-01-02, 2017-01-03) resultaram em três partições. Reexecutar 2017-01-01 manteve 3.989 linhas naquele dia (sem duplicação) e não alterou os outros dois.
+
+**Trade-off aceito.** A idempotência resolve a landing, mas não o pipeline: por padrão, o Auto Loader não relê um arquivo já processado. A regeneração de um dia já ingerido precisa ser tratada na ingestão (Etapa 2).
