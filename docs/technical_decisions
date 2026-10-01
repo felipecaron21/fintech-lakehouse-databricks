@@ -204,3 +204,32 @@ Redução de ~11x no tempo de leitura por execução do gerador diário.
 - A lógica é menos intuitiva que a de um arquivo de estado, e depende de disciplina: a versão do Faker fixada, a semente por data e a ordem estável dos clientes.
 
 **Em ambiente corporativo.** O estado vive no sistema de origem (o banco do core bancário), e as mudanças chegam por extração incremental ou CDC. O *replay* é uma técnica de simulação; em produção, a ideia equivalente é o *event sourcing*, em que o estado atual é reconstruído a partir da sequência de eventos.
+
+---
+
+## ADR-09. Defeitos de qualidade injetados no gerador diário, com gabarito
+
+**Contexto.** O pipeline precisa provar que lida com os problemas comuns de produção. Para isso, o gerador diário injeta defeitos em percentuais baixos e fixos, de forma determinística (semente = data + um deslocamento por tipo de defeito), mantendo a idempotência (ADR-07).
+
+**Decisões por defeito.**
+
+| Defeito | Regra | Taxa | Alternativa descartada e motivo |
+|---|---|---|---|
+| Valor nulo | `amount` = `null` | 0,5% | Valores negativos: o dataset já tem negativos legítimos (estornos), e a Silver não conseguiria distinguir defeito de estorno |
+| Duplicada no próprio arquivo | cópia exata de uma transação do dia | 0,5% | — |
+| Duplicada reenviada | cópia exata de uma transação enviada num dos 7 dias anteriores | 0,5% | Só duplicadas no mesmo arquivo: não testariam a deduplicação contra o histórico, que um `dropDuplicates` no lote não resolve |
+| Cartão inexistente | `card_id` trocado por um id acima de 900000 | 0,3% | — |
+| Atrasada | sai do arquivo do dia em que aconteceu e chega de 1 a 7 dias depois | 2% | Copiar transações antigas para o arquivo de hoje: seria uma duplicata entre dias, e não um atraso |
+| Coluna nova | `device_type` a partir de 2017-03-01 (`pos` para Swipe/Chip; `mobile` ou `web` para Online) | — | Data em 2026, sugerida pelo guia: fora da linha do tempo do projeto (ADR-04) |
+
+**Gabarito.** Cada defeito injetado é registrado por dia (`tipo_defeito`, `transaction_id`, `detalhe`) em `landing/raw_files/kaggle/prepared/gabarito_defeitos/`, fora das pastas lidas pelo pipeline. Ele permite validar as regras de qualidade da Silver contra o que foi realmente injetado: por exemplo, o número de linhas em quarentena por `amount` nulo deve bater com o gabarito do dia.
+
+**Detalhes de implementação.**
+- O arquivo de um dia depende dos 14 dias anteriores (as atrasadas chegam de até 7 dias antes, e as reenviadas copiam o que foi entregue nos 7 dias anteriores, que por sua vez inclui atrasadas). O gerador lê essa janela da fonte particionada (ADR-06).
+- As reenviadas são cópias exatas do que foi entregue no dia de origem, incluindo eventuais defeitos daquele dia.
+- O JSON é gravado com `ignoreNullFields=false`, para que o defeito apareça como `"amount": null`, e não como uma chave ausente. Antes de 2017-03-01, a chave `device_type` não existe no arquivo (mudança de layout real, e não um campo nulo).
+- Transações dos últimos dias do dataset só atrasam até 2019-10-31, para nenhuma se perder.
+
+**Validação.** Em 60 dias simulados, cada transação de origem aparece exatamente uma vez nos arquivos, sem contar as duplicadas injetadas: as atrasadas saem de um dia e chegam em outro, sem perda nem repetição.
+
+**Trade-off aceito.** Nos primeiros 7 dias do incremental, os arquivos têm um pouco menos transações que a origem (algumas atrasaram e ainda não há atrasadas chegando).

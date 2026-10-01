@@ -32,63 +32,71 @@ if not (data_min <= data <= data_max):
 
 # COMMAND ----------
 
-df_transactions_data = (spark.read
-                        .parquet(f'/Volumes/{catalogo}/landing/raw_files/kaggle/prepared/transacoes_incremental/')
-)
-
-display(df_transactions_data.limit(20))
-
-# COMMAND ----------
-
+# --- Transações do dia com defeitos de qualidade + gabarito (ADR-09) ---
+# Substitui as células de transações do dia (leitura filtrada, select do merchant e gravação).
+from datetime import date, timedelta
 from pyspark.sql import functions as F
+from pyspark.sql.types import StructType, StructField, StringType
+from transaction_defects import GeradorDeDefeitos, D0, DATA_COLUNA_NOVA
 
-var_month = data_simulada[:7]
+# 1. Fonte: transações do dia e dos 14 dias anteriores (necessárias para atrasadas e reenviadas)
+inicio_janela = max(D0, data - timedelta(days=14))
+dias_janela = [inicio_janela + timedelta(days=k) for k in range((data - inicio_janela).days + 1)]
+meses_janela = sorted({d.strftime("%Y-%m") for d in dias_janela})
 
-df_transactions_data_file = (
-    df_transactions_data
-        .filter(F.col("month_year") == var_month)
-        .filter(F.substring("date", 1, 10) == data_simulada)
-)
+df_janela = (spark.read
+    .parquet(f"/Volumes/{catalogo}/landing/raw_files/kaggle/prepared/transacoes_incremental/")
+    .filter(F.col("month_year").isin(meses_janela))                       # partition pruning
+    .filter(F.substring("date", 1, 10).between(str(inicio_janela), str(data)))
+    .drop("month_year")
+    .orderBy(F.col("id").cast("long")))                                    # ordem estável para o sorteio
 
-display(df_transactions_data_file.limit(20))
-print(df_transactions_data_file.count())
+transacoes_por_dia = {d: [] for d in dias_janela}
+for linha in df_janela.collect():
+    transacoes_por_dia[date.fromisoformat(linha["date"][:10])].append(linha.asDict())
 
-# COMMAND ----------
+# 2. Aplica os defeitos (determinístico: mesmo dia → mesmo arquivo e mesmo gabarito)
+linhas_arquivo, gabarito = GeradorDeDefeitos(transacoes_por_dia).gerar_dia(data)
 
-from pyspark.sql import functions as F
+# 3. Schema do arquivo: device_type só existe a partir da DATA_COLUNA_NOVA
+campos = [StructField(nome, StringType()) for nome in
+          ["id", "date", "client_id", "card_id", "amount", "use_chip", "errors"]]
+campos.append(StructField("merchant", StructType([StructField(nome, StringType()) for nome in
+              ["merchant_id", "merchant_city", "merchant_state", "zip", "mcc"]])))
+if data >= DATA_COLUNA_NOVA:
+    campos.append(StructField("device_type", StringType()))
 
-df_transactions_daily_struct = df_transactions_data_file.select(
-    "id",
-    "date",
-    "client_id",
-    "card_id",
-    "amount",
-    "use_chip",
-    "errors",
-    F.struct(
-        F.col("merchant_id"),
-        F.col("merchant_city"),
-        F.col("merchant_state"),
-        F.col("zip"),
-        F.col("mcc")
-    ).alias("merchant"),
-    F.lit(data_simulada).alias("date_partition"),
-)
+df_transacoes_dia = (spark.createDataFrame(linhas_arquivo, StructType(campos))
+    .withColumn("date_partition", F.lit(data_simulada)))
 
-df_transactions_daily_struct.printSchema()
-
-# COMMAND ----------
-
-path_daily_file = (f'Volumes/{catalogo}/landing/raw_files/transacoes/daily/')
-
-(df_transactions_daily_struct 
+# 4. Grava o arquivo do dia (ignoreNullFields=False: o defeito aparece como "amount": null)
+(df_transacoes_dia
     .coalesce(1)
     .write
     .mode("overwrite")
-    .option("partitionOverWriteMode", "dynamic")
+    .option("partitionOverwriteMode", "dynamic")
+    .option("ignoreNullFields", False)
     .partitionBy("date_partition")
-    .json(path_daily_file)
- )
+    .json(f"/Volumes/{catalogo}/landing/raw_files/transacoes/daily/"))
+
+# 5. Grava o gabarito do dia (fora das pastas lidas pelo pipeline)
+schema_gabarito = StructType([StructField(nome, StringType()) for nome in
+                              ["date_partition", "tipo_defeito", "transaction_id", "detalhe"]])
+if gabarito:
+    (spark.createDataFrame(gabarito, schema_gabarito)
+        .coalesce(1)
+        .write
+        .mode("overwrite")
+        .option("partitionOverwriteMode", "dynamic")
+        .option("header", True)
+        .partitionBy("date_partition")
+        .csv(f"/Volumes/{catalogo}/landing/raw_files/kaggle/prepared/gabarito_defeitos/"))
+
+# 6. Resumo
+print(f"{data_simulada}: {len(transacoes_por_dia[data])} transações na origem, "
+      f"{len(linhas_arquivo)} no arquivo")
+display(spark.createDataFrame(gabarito, schema_gabarito).groupBy("tipo_defeito").count()
+        if gabarito else spark.createDataFrame([], schema_gabarito))
 
 # COMMAND ----------
 
@@ -114,6 +122,7 @@ display(dbutils.fs.ls(f'/Volumes/{catalogo}/landing/raw_files/transacoes/daily/'
 # COMMAND ----------
 
 # --- Mudanças de clientes do dia (ADR-08) ---
+from pyspark.sql import functions as F
 from client_changes import reconstruir_estado
 from identity import gerar_identidade
 
@@ -175,6 +184,7 @@ else:
 # COMMAND ----------
 
 # --- Mudanças de cartões do dia (ADR-08, SCD1 na Gold) ---
+from pyspark.sql import functions as F
 from card_changes import reconstruir_estado as reconstruir_estado_cartoes
 
 # 1. Estado inicial no D0: cartões do Kaggle, como chegaram (tudo como texto)
@@ -222,3 +232,7 @@ if cartoes_mudados_no_dia:
     display(df_cartoes_dia)
 else:
     print("Dia sem mudanças de cartões: nenhum arquivo gravado.")
+
+# COMMAND ----------
+
+df_transacoes_dia.printSchema()
