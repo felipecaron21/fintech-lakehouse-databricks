@@ -174,3 +174,29 @@ Redução de ~11x no tempo de leitura por execução do gerador diário.
 **Validação.** Três dias gerados (2017-01-01, 2017-01-02, 2017-01-03) resultaram em três partições. Reexecutar 2017-01-01 manteve 3.989 linhas naquele dia (sem duplicação) e não alterou os outros dois.
 
 **Trade-off aceito.** A idempotência resolve a landing, mas não o pipeline: por padrão, o Auto Loader não relê um arquivo já processado. A regeneração de um dia já ingerido precisa ser tratada na ingestão (Etapa 2).
+
+---
+
+## ADR-08. Estado dos clientes no gerador diário reconstruído por *replay* determinístico a partir do D0
+
+**Contexto.** O gerador diário envia as mudanças de clientes no formato de **registro completo** (o cliente inteiro, com os valores atuais), que é o formato mais simples e mais robusto para alimentar o SCD2. Mas o gerador só conhece o arquivo original do Kaggle. Sem saber o que ele próprio gerou nos dias anteriores, um cliente alterado duas vezes (endereço no dia 5, renda no dia 20) seria enviado no dia 20 com o **endereço original**, e o SCD2 registraria uma reversão que nunca aconteceu.
+
+**Alternativas.**
+- **Arquivo de estado** atualizado a cada execução: realista, mas o resultado passa a depender da ordem das execuções. Regenerar um dia antigo depois de dias mais novos produziria um arquivo diferente do original, quebrando a idempotência (ADR-07).
+- **Cada cliente muda no máximo uma vez**, com um arquivo de controle: elimina o conflito, mas perde realismo e esgota os clientes em cerca de 100 dias simulados (~20 mudanças por dia em 2.000 clientes).
+- **Replay determinístico** a partir do D0.
+
+**Decisão.** O gerador não guarda estado. Para gerar a data D, ele parte dos clientes do Kaggle (com a identidade da ADR-05) e **reaplica em memória**, em ordem, as mudanças sorteadas em cada dia de 2017-01-01 até D. Só as mudanças do dia D são gravadas, como registros completos.
+- As mudanças de cada dia são sorteadas por uma função com **semente igual à data**, usando um sorteador próprio (`random.Random(semente)`), e não o `random` global.
+- A lista de clientes é **ordenada pelo `id`** antes do sorteio, porque o `collect()` do Spark não garante ordem.
+
+**Motivo.**
+- O registro de cada dia reflete todas as mudanças anteriores, como num sistema de origem real.
+- Idempotente e independente da ordem de execução: regenerar qualquer dia produz sempre o mesmo arquivo.
+- Nenhum arquivo de estado para manter, versionar ou corromper.
+
+**Trade-offs aceitos.**
+- O custo cresce com a distância até o D0 (~1.030 dias no máximo). Como o estado são 2.000 clientes em memória e ~20 mudanças por dia, o replay completo leva menos de um segundo.
+- A lógica é menos intuitiva que a de um arquivo de estado, e depende de disciplina: a versão do Faker fixada, a semente por data e a ordem estável dos clientes.
+
+**Em ambiente corporativo.** O estado vive no sistema de origem (o banco do core bancário), e as mudanças chegam por extração incremental ou CDC. O *replay* é uma técnica de simulação; em produção, a ideia equivalente é o *event sourcing*, em que o estado atual é reconstruído a partir da sequência de eventos.

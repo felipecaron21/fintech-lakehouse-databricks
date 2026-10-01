@@ -105,3 +105,64 @@ display(dbutils.fs.ls(f'/Volumes/{catalogo}/landing/raw_files/transacoes/daily/'
 # MAGIC - **Validação:**
 # MAGIC   - 3 dias gerados → 3 partições (2017-01-01: 3.989; 2017-01-02: 3.494; 2017-01-03: 3.930).
 # MAGIC   - Reexecução de 2017-01-01 → continua com 3.989 linhas, e os outros dias não foram alterados.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mudanças de clientes
+
+# COMMAND ----------
+
+# --- Mudanças de clientes do dia (ADR-08) ---
+from client_changes import reconstruir_estado
+from identity import gerar_identidade
+
+# 1. Estado inicial no D0: clientes do Kaggle + identidade sintética (ADR-05)
+schema_users = """
+    id STRING, current_age STRING, retirement_age STRING, birth_year STRING,
+    birth_month STRING, gender STRING, address STRING, latitude STRING,
+    longitude STRING, per_capita_income STRING, yearly_income STRING,
+    total_debt STRING, credit_score STRING, num_credit_cards STRING
+"""
+
+df_users_kaggle = (spark.read
+    .schema(schema_users)
+    .option("header", True)
+    .csv(f"/Volumes/{catalogo}/landing/raw_files/kaggle/users_data.csv"))
+
+clientes_d0 = {}
+for linha in df_users_kaggle.collect():
+    registro = linha.asDict()
+    registro.update(gerar_identidade(registro["id"], registro["gender"]))
+    clientes_d0[registro["id"]] = registro
+
+# 2. Replay do D0 até a data simulada (só em memória)
+estado, mudados_no_dia = reconstruir_estado(data, clientes_d0)
+print(f"{data_simulada}: {len(mudados_no_dia)} clientes com mudança")
+
+# 3. Grava o registro completo dos clientes que mudaram hoje (mesma ordem de colunas do backfill)
+colunas_clientes = [
+    "id", "name", "ssn", "email", "current_age", "retirement_age", "birth_year",
+    "birth_month", "gender", "address", "latitude", "longitude", "per_capita_income",
+    "yearly_income", "total_debt", "credit_score", "num_credit_cards",
+]
+
+if mudados_no_dia:
+    registros_do_dia = [estado[id_cliente] for id_cliente in mudados_no_dia]
+
+    df_clientes_dia = (spark.createDataFrame(registros_do_dia)
+        .select(*colunas_clientes)
+        .withColumn("date_partition", F.lit(data_simulada)))
+
+    (df_clientes_dia
+        .coalesce(1)
+        .write
+        .mode("overwrite")
+        .option("partitionOverwriteMode", "dynamic")
+        .option("header", True)
+        .partitionBy("date_partition")
+        .csv(f"/Volumes/{catalogo}/landing/raw_files/clientes/daily/"))
+
+    display(df_clientes_dia)
+else:
+    print("Dia sem mudanças de clientes: nenhum arquivo gravado.")
