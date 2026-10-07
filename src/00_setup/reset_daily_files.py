@@ -26,3 +26,7 @@ display(dbutils.fs.rm(f'/Volumes/{catalogo}/landing/raw_files/kaggle/prepared/ga
 # COMMAND ----------
 
 display(dbutils.fs.rm(f'/Volumes/{catalogo}/ops/checkpoints/bronze_transacoes/', recurse=True))
+
+# COMMAND ----------
+
+spark.sql(f'DROP TABLE IF EXISTS {catalogo}.bronze.raw_transacoes')
