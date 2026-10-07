@@ -22,3 +22,7 @@ display(dbutils.fs.rm(f'/Volumes/{catalogo}/landing/raw_files/cartoes/daily/', r
 # COMMAND ----------
 
 display(dbutils.fs.rm(f'/Volumes/{catalogo}/landing/raw_files/kaggle/prepared/gabarito_defeitos/', recurse=True))
+
+# COMMAND ----------
+
+display(dbutils.fs.rm(f'/Volumes/{catalogo}/ops/checkpoints/bronze_transacoes/', recurse=True))
