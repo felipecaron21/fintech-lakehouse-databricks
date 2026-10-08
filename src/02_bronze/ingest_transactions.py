@@ -55,8 +55,7 @@ from pyspark.sql import functions as F
 
 df_validacao = spark.table(f'{catalogo}.bronze.raw_transacoes')
 
-display(
-    df_validacao
+display(df_validacao
     .groupBy("_arquivo_origem")
     .count()
     .orderBy(F.col("count").desc())
