@@ -38,23 +38,3 @@ SELECT
     COUNT(*) AS registros
 FROM bronze.raw_cartoes
 GROUP BY _arquivo_origem;
-
--- COMMAND ----------
-
-DESCRIBE bronze.raw_cartoes;
-
--- COMMAND ----------
-
-DESCRIBE DETAIL bronze.raw_cartoes;
-
--- COMMAND ----------
-
-DESCRIBE DETAIL bronze.raw_transacoes;
-
--- COMMAND ----------
-
-DESCRIBE HISTORY bronze.raw_cartoes;
-
--- COMMAND ----------
-
-DESCRIBE HISTORY bronze.raw_transacoes;
