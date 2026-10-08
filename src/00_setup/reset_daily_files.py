@@ -53,3 +53,14 @@ display(dbutils.fs.rm(f'/Volumes/{catalogo}/ops/checkpoints/bronze_clientes/', r
 # COMMAND ----------
 
 spark.sql(f'DROP TABLE IF EXISTS {catalogo}.bronze.raw_clientes')
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Tabela bronze (cartoes)
+# MAGIC
+# MAGIC - Obs: Aqui não excluimos checkpoint pois a tabela foi criada com COPY INTO e o controle é feito pelos metadados da própria tabela.
+
+# COMMAND ----------
+
+spark.sql(f'DROP TABLE IF EXISTS {catalogo}.bronze.raw_cartoes')
