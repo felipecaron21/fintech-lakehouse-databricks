@@ -24,17 +24,17 @@ tabela_destino = f'{catalogo}.bronze.raw_transacoes'
 from pyspark.sql import functions as F
 
 df_transacoes_read = (spark.readStream
-                    .format("cloudFiles")
-                    .option("cloudFiles.format", "json")
-                    .option("cloudFiles.schemaLocation", checkpoint)
-                    .option("cloudFiles.inferColumnTypes", "false")
-                    .option("cloudFiles.partitionColumns", "")
-                    .option("cloudFiles.schemaEvolutionMode", "addNewColumns")
-                    .load(origem))
+    .format("cloudFiles")
+    .option("cloudFiles.format", "json")
+    .option("cloudFiles.schemaLocation", checkpoint)
+    .option("cloudFiles.inferColumnTypes", "false")
+    .option("cloudFiles.partitionColumns", "")
+    .option("cloudFiles.schemaEvolutionMode", "addNewColumns")
+    .load(origem))
 
 df_transacoes = (df_transacoes_read
-                .withColumn("_arquivo_origem", F.col("_metadata.file_path"))
-                .withColumn("_ingerido_em", F.current_timestamp()))
+    .withColumn("_arquivo_origem", F.col("_metadata.file_path"))
+    .withColumn("_ingerido_em", F.current_timestamp()))
 
 # COMMAND ----------
 
