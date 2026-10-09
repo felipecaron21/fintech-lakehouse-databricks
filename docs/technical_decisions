@@ -86,6 +86,13 @@ Principais decisões de arquitetura do projeto: contexto, alternativas avaliadas
 
 **Em ambiente corporativo.** O backfill viria de uma extração do sistema legado (dump do banco ou export do core bancário), normalmente particionada por período e carregada em janelas para não sobrecarregar a origem nem o cluster.
 
+**Revisão na Etapa 2 (Bronze).** Antes de implementar o Auto Loader, foi reavaliada uma alternativa comum no mercado: uma **migração histórica por script** (batch único na Bronze), com o Auto Loader apontado só para `daily/`.
+- A favor da migração: separa claramente a carga histórica da operação diária, e o histórico pode ser carregado em janelas controladas.
+- Contra: dois caminhos de código que precisam produzir o mesmo schema e as mesmas colunas de controle (risco de divergência de tipos entre o que o script grava e o que o Auto Loader infere), e o checkpoint só cobre o diário, então o script precisa ser idempotente por conta própria.
+- **Decisão mantida: mesma porta.** O Auto Loader foi feito para esse cenário: no primeiro run, com o checkpoint vazio, ele ingere os arquivos existentes e, depois, só os novos. A diferença de estrutura entre `backfill/ano=…` e `daily/date_partition=…` é tratada nas opções do Auto Loader e validada com dado, em vez de mudar a arquitetura.
+- **Gatilho para revisitar:** se o backfill estourar a cota diária da Free Edition num único run, ou se a inferência de schema sobre as duas estruturas se mostrar instável.
+- **Implementação: sem colunas de partição na Bronze** (`cloudFiles.partitionColumns = ""`). Validado com dado: só com o backfill, o Auto Loader criava a coluna `ano`; com o backfill e o diário juntos, as estruturas conflitantes faziam ele ignorar todas as partições, sem erro. O resultado dependia de existir ou não um arquivo diário no primeiro run. Com a opção explícita, o schema é o mesmo em qualquer cenário. As colunas não fazem falta: a data está dentro do JSON (`date`), e o caminho completo do arquivo fica em `_arquivo_origem`.
+
 ---
 
 ## ADR-05. Fintech americana, com dados de identidade sintéticos para a governança
@@ -151,6 +158,8 @@ Redução de ~11x no tempo de leitura por execução do gerador diário.
 - A otimização acontece no simulador, e não no pipeline; as otimizações do pipeline ficam para a etapa de performance.
 
 **Em ambiente corporativo.** O equivalente seria a origem já entregar extrações por período, ou uma tabela Delta de staging com *Liquid Clustering* pela data, que o Databricks recomenda no lugar do particionamento tradicional na maioria dos casos.
+
+**Pendência (revisão na Etapa 2).** Na Etapa 2 ficou claro que a **primeira ação** de um notebook paga custos de aquecimento (no serverless, um `count` caiu de 10 s para 2 s só por ter sido executado de novo). Se a medição de ~12 s foi a primeira execução e a de ~1,1 s não, parte do ganho pode ser aquecimento. Refazer a comparação com execuções "quentes" (várias rodadas de cada versão) antes de usar os números em entrevista ou post.
 
 ---
 
@@ -233,3 +242,151 @@ Redução de ~11x no tempo de leitura por execução do gerador diário.
 **Validação.** Em 60 dias simulados, cada transação de origem aparece exatamente uma vez nos arquivos, sem contar as duplicadas injetadas: as atrasadas saem de um dia e chegam em outro, sem perda nem repetição.
 
 **Trade-off aceito.** Nos primeiros 7 dias do incremental, os arquivos têm um pouco menos transações que a origem (algumas atrasaram e ainda não há atrasadas chegando).
+
+---
+
+## ADR-10. Bronze sem inferência de tipos: todas as colunas como `STRING`
+
+**Contexto.** O Auto Loader pode inferir os tipos das colunas de JSON e CSV (`cloudFiles.inferColumnTypes = true`, como sugere o guia) ou ler tudo como `STRING` (padrão). A Bronze guarda o dado como chegou, e a landing tem problemas de formato conhecidos (`amount` com `$`) e uma coluna que só aparece depois (`device_type`).
+
+**Alternativas.**
+- **Inferir tipos (`true`):** a Bronze já nasce tipada. Mas o tipo é decidido uma vez, a partir de uma amostra dos primeiros arquivos (o backfill de 2010), e fica gravado no `schemaLocation`. Um valor que chegue depois fora desse tipo não quebra o stream: vai para `_rescued_data`, e a coluna fica `null`. O dado não se perde, mas sai da coluna onde deveria estar.
+- **Tudo como `STRING` (padrão):** nenhum valor depende de uma inferência feita no passado. Toda conversão de tipo fica explícita, num só lugar.
+
+**Decisão.** Bronze com todas as colunas como `STRING`, e a opção `cloudFiles.inferColumnTypes = "false"` escrita explicitamente no código, para deixar claro que foi intencional. A tipagem (`regexp_replace` + `cast` para `DECIMAL`, `TIMESTAMP` etc.) fica na Silver, com regras de qualidade para os valores que não convertem.
+
+**Motivo.** Mantém a regra da Bronze (dado como chegou), evita que o schema dependa de uma amostra antiga e concentra as regras de tipo na camada responsável por elas. É a mesma lógica do gerador (Etapa 1), que lê a fonte como `STRING` para não perder valores no modo `PERMISSIVE`.
+
+**Trade-offs aceitos.** Consultas direto na Bronze precisam de `cast`. A Silver fica com mais código de conversão.
+
+---
+
+## ADR-11. Evolução de schema na Bronze: `addNewColumns` + retry do job
+
+**Contexto.** A partir de 2017-03-01, o JSON das transações ganha a coluna `device_type`. O Auto Loader precisa de uma política para colunas que não estão no schema salvo no `schemaLocation`. O job vai rodar todo dia, sem ninguém acompanhando.
+
+**Alternativas.**
+- `addNewColumns`: o stream falha uma vez, grava o schema novo e, na execução seguinte, segue com a coluna.
+- `rescue`: o schema nunca muda; os valores novos vão para `_rescued_data`. Exige monitorar a `_rescued_data` e, para promover a coluna, um ajuste manual. As linhas anteriores ao ajuste ficam com o valor só dentro da `_rescued_data`, e a Silver teria que buscar em dois lugares.
+- `failOnNewColumns`: falha até alguém atualizar o schema manualmente.
+- `none`: a coluna nova é ignorada (perda de dado na Bronze).
+
+**Decisão.** `addNewColumns`, combinado com retry na task do job (Etapa 8). A primeira tentativa falha e atualiza o schema; o retry automático passa com a coluna nova.
+
+**Motivo.** A Bronze guarda o dado como chegou, então uma coluna nova deve entrar. Com o retry, a correção é automática, e a falha fica registrada no histórico do job como sinal de que o schema da origem mudou, sem precisar construir um monitoramento à parte. É a combinação recomendada pela Databricks.
+
+**Quando o `rescue` seria a escolha.** Quando o schema da tabela é um contrato que não pode mudar sem aprovação (consumidores dependem dele), ou quando a origem adiciona campos com frequência e sem controle (payloads de APIs de terceiros, eventos), e deixar o schema crescer a cada campo novo seria pior do que guardar o excedente à parte.
+
+**Trade-offs aceitos.** Uma falha registrada no job a cada mudança de schema da origem. O schema da Bronze cresce sem aprovação prévia; o controle do que segue adiante fica na Silver, que seleciona as colunas explicitamente.
+
+---
+
+## ADR-12. Arquivos reenviados: a Bronze registra, a Silver deduplica
+
+**Contexto.** O checkpoint do Auto Loader controla os arquivos já processados pelo **caminho**. Quando um dia é regenerado, o dynamic partition overwrite apaga o arquivo antigo e grava um novo, com outro nome (`part-…-tid-…`). Validado com dado: depois de regenerar 2017-01-01 e rodar a ingestão, a `raw_transacoes` foi de 9.355.778 para 9.359.707 linhas (+3.929), com dois arquivos diferentes na mesma pasta `date_partition=2017-01-01/`.
+
+**Alternativas.**
+- **A. A Bronze registra, a Silver deduplica:** as duas entregas ficam na Bronze; a Silver deduplica pelo `id` da transação e mantém a versão mais recente (`_ingerido_em`).
+- **B. Nome de arquivo fixo no gerador** (ex.: `transacoes_2017-01-01.json`): com o mesmo caminho, o checkpoint ignora o arquivo regenerado (por padrão, `cloudFiles.allowOverwrites = false`). Em produção, um arquivo **corrigido** com o mesmo nome seria ignorado em silêncio.
+- **C. Reset completo antes de regenerar:** disciplina de uso; não se aplica em produção, onde a Bronze não é apagada.
+- Controlar pela data da partição: o Auto Loader não oferece isso, e descartar um reenvio pela data impediria que correções chegassem.
+
+**Decisão.** Caminho A.
+
+**Motivo.**
+- Mantém a regra da Bronze (dado como chegou, só append): ela funciona como log de auditoria de tudo o que foi entregue, com `_arquivo_origem` e `_ingerido_em` para rastrear cada entrega.
+- Em produção, reenvios costumam ser correções ou reprocessamentos da origem; a ingestão não deve decidir sozinha descartá-los.
+- A Silver já precisa deduplicar por `id` por causa das duplicadas injetadas (ADR-09); a mesma regra cobre o reenvio de um arquivo inteiro.
+
+**Trade-offs aceitos.** A Bronze cresce com entregas repetidas, e contagens direto na Bronze não representam transações únicas. A deduplicação na Silver passa a ser obrigatória, e não opcional.
+
+**Em ambiente corporativo.** É o padrão do medallion: Bronze imutável e completa, regras de unicidade na Silver. Se a origem tivesse um contrato de "nome fixo por entrega" e o requisito fosse reprocessar correções no mesmo caminho, a opção seria `cloudFiles.allowOverwrites = true`, ainda com deduplicação a jusante.
+
+---
+
+## ADR-13. Um notebook de ingestão por entidade na Bronze
+
+**Contexto.** A Bronze tem várias entidades (transações, clientes, cartões, MCC, fraude), cada uma com o seu stream, checkpoint e tabela. Na Etapa 8, cada notebook vira uma task do job, com retry próprio. O `addNewColumns` depende de retry para seguir depois de uma mudança de schema (ADR-11).
+
+**Alternativas.** Um notebook único de Bronze, com uma seção por entidade, ou um notebook por entidade (`ingest_transactions`, `ingest_clients`, `ingest_cards`...).
+
+**Decisão.** Um notebook por entidade.
+
+**Motivo.**
+- **Retry granular:** uma falha nas transações (ex.: coluna nova) reexecuta só a ingestão das transações, e não a Bronze inteira.
+- **Isolamento de falhas:** uma entidade com problema não bloqueia as outras.
+- **Paralelismo no job:** as tasks podem rodar em paralelo e cada uma ter a sua dependência para a Silver (ex.: a Silver de transações espera só a Bronze de transações).
+- Commits atômicos e histórico de mudanças por entidade no Git.
+
+**Trade-offs aceitos.** Código repetido entre os notebooks (widget, caminhos, opções do Auto Loader). Decidido **não** extrair uma função comum para um módulo `.py` por enquanto: cada notebook escreve a ingestão completa em PySpark, o que deixa cada entidade legível sozinha e serve de prática do Auto Loader. Se a repetição crescer ou uma opção precisar mudar em todas as entidades, o caminho é um módulo comum, como o `identity.py` do gerador.
+
+---
+
+## ADR-14. Cartões ingeridos com `COPY INTO` (SQL), e não com Auto Loader
+
+**Contexto.** Transações e clientes entram na Bronze com Auto Loader (PySpark). Os cartões são uma entidade pequena (~6 mil no backfill e algumas dezenas de mudanças em parte dos dias), em CSV simples.
+
+**Alternativas.** Auto Loader, como nas outras entidades, ou `COPY INTO`, o comando SQL de carga incremental de arquivos.
+
+**Decisão.** `COPY INTO`, num notebook SQL com o catálogo parametrizado (`IDENTIFIER(:catalogo)`).
+
+**Motivo.**
+- O perfil da entidade combina com o `COPY INTO`: poucos arquivos, carga simples, sem necessidade de streaming.
+- O controle dos arquivos já carregados fica nos **metadados da tabela**, sem pasta de checkpoint; rodar duas vezes carrega 0 linhas na segunda (idempotente).
+- O projeto passa a demonstrar as duas formas de ingestão incremental do Databricks e o critério de escolha entre elas (Auto Loader: volume alto, ingestão contínua, evolução de schema com modos; `COPY INTO`: cargas simples e pontuais, em SQL).
+
+**Regras mantidas.** Tudo como `STRING` (ADR-10: sem `inferSchema`, ao contrário do guia); arquivos reenviados registrados na Bronze e deduplicados na Silver (ADR-12); colunas de controle `_arquivo_origem` e `_ingerido_em`.
+
+**Trade-offs aceitos.** Duas formas de ingestão para manter no projeto. O `COPY INTO` tem evolução de schema mais simples (`mergeSchema`) e é indicado para milhares de arquivos, e não milhões; se o volume de cartões crescer muito, migrar para Auto Loader.
+
+---
+
+## ADR-15. Dados de cartão (PCI DSS): CVV descartado e PAN truncado já na Bronze
+
+**Contexto.** O `cards_data` traz o número completo do cartão (`card_number`, o PAN) e o `cvv`. Mesmo com dados sintéticos, o projeto simula uma fintech e trata os dados como reais. O PCI DSS exige: **CVV** (dado sensível de autenticação) não pode ser armazenado depois da autorização, nem criptografado; **PAN** pode ser armazenado só se ilegível onde estiver gravado (truncado, com hash, criptografado ou tokenizado) e mascarado na exibição. Isso conflita com a regra da Bronze "guarda o dado como chegou".
+
+**Alternativas.**
+- Trazer tudo para a Bronze e proteger com **máscara de coluna** do Unity Catalog (Etapa 7). Descartada: a máscara atua na **consulta**, e não no armazenamento; o dado fica em claro nos arquivos da tabela, visível para quem é isento da máscara, para quem acessa o storage e no histórico do Delta. Não atende ao PCI para o PAN e viola a proibição de armazenar o CVV.
+- Proteger o PAN na Bronze com hash (exige chave secreta/HMAC, já que o espaço de PANs é pequeno e um hash simples é quebrável por força bruta), criptografia (exige gestão de chave) ou tokenização (exige um cofre externo).
+- **Truncamento** do PAN na ingestão.
+
+**Decisão.**
+- **CVV:** não entra na Bronze (descartado no `SELECT` do `COPY INTO`).
+- **PAN:** truncado na ingestão em `card_bin` (6 primeiros dígitos, que identificam bandeira e emissor) e `card_last4` (4 últimos); o número completo não entra na Bronze.
+- **Landing:** os arquivos da origem continuam com PAN e CVV; o acesso ao volume é restrito por permissões do Unity Catalog (`READ VOLUME` só para quem executa a ingestão). Num cenário real, a landing teria também retenção curta.
+- **Etapa 7:** as máscaras de coluna do Unity Catalog passam a proteger os **dados pessoais dos clientes** (SSN, e-mail, endereço), que podem ser armazenados, além de filtros de linha, permissões por camada e linhagem.
+
+**Motivo.** Uma regra de compliance prevalece sobre uma convenção de arquitetura; a exceção à regra da Bronze fica documentada aqui. Nenhuma etapa do projeto precisa do PAN completo: o cartão tem chave própria (`id`), e a análise usa só o emissor (BIN) e a identificação de exibição (4 últimos). Truncamento é simples, em SQL, irreversível e aceito pelo PCI.
+
+**Trade-offs aceitos.** O PAN completo se perde a partir da Bronze; se um caso de uso futuro exigir o número (ex.: conciliação com a bandeira), seria preciso tokenização com cofre. Os arquivos da landing seguem com dados sensíveis, protegidos só por permissão de acesso.
+
+**Para entrevista.** "Controlar a exibição (máscara) é diferente de proteger o armazenamento (truncar, cifrar, tokenizar). E o CVV não se armazena em nenhuma camada."
+
+---
+
+## ADR-16. Dados de referência (MCC e rótulos de fraude): leitura batch com recarga completa
+
+**Contexto.** `mcc_codes.json` (dicionário de categorias de estabelecimento) e `train_fraud_labels.json` (rótulos de fraude por transação) chegam uma vez, inteiros, e o gerador não cria versões diárias deles. Cada arquivo é um **retrato completo** (*snapshot*) do conjunto de dados, e não um lote de registros novos.
+
+**Alternativas.**
+- Ferramenta incremental (Auto Loader ou `COPY INTO`): lembra os arquivos já lidos e só acrescenta os novos.
+- Leitura batch (`spark.read`) com gravação em `mode("overwrite")`: substitui a tabela inteira a cada execução.
+
+**Decisão.** Leitura batch com `overwrite`, um notebook por entidade (ADR-13).
+
+**Motivo.**
+- Para dados que chegam como retrato completo, a recarga completa é a forma correta, e não só a mais simples. Se a origem enviasse um dicionário de MCC atualizado:
+  - com o **mesmo nome** de arquivo, as ferramentas incrementais o **ignorariam** (o caminho já está registrado; `cloudFiles.allowOverwrites = false` por padrão);
+  - com **outro nome**, elas fariam **append**, e cada código antigo apareceria duas vezes;
+  - o `overwrite` substitui a tabela pelo retrato novo, sem duplicar e sem perder códigos.
+- Ferramentas incrementais servem quando a origem envia **só os registros novos** (transações, mudanças de cadastro), e não o conjunto inteiro.
+- O `overwrite` numa tabela Delta é **atômico**: cria uma nova versão da tabela; quem consulta durante a gravação vê a versão anterior completa, nunca uma tabela vazia ou pela metade. Uma recarga errada pode ser desfeita com time travel (`RESTORE`).
+
+**Trade-offs aceitos.** Cada execução relê o arquivo inteiro (aceitável: o MCC tem centenas de linhas; o arquivo de fraude é lido uma vez). Se o arquivo de fraude passasse a chegar em lotes de rótulos novos, a entidade mudaria para ingestão incremental.
+
+**Gravação sem `repartition` (medido).** JSON multiline não é divisível: cada arquivo é lido por uma task e o `explode` acontece nessa mesma partição, então a gravação gera um arquivo por tabela. Medido: MCC com 109 linhas em 1 arquivo; fraude com 8.914.963 linhas em **1 arquivo de ~35 MB**, gravado em ~1 s (sessão aquecida). 35 MB está abaixo do tamanho recomendado de arquivo Delta (centenas de MB), então um `repartition` antes da gravação só acrescentaria um shuffle e geraria arquivos pequenos. Se o volume crescesse a ponto de um arquivo passar de ~1 GB, as opções seriam `repartition(n)` com n ≈ tamanho total ÷ tamanho-alvo, `maxRecordsPerFile`, ou receber a origem num formato divisível (JSON Lines/Parquet).
+- **Experimento adiado para a Etapa 10:** gravar com `repartition(8)` e comparar tempo, `numFiles` e `sizeInBytes` com a versão sem `repartition`, em execuções aquecidas.
+
+**Formato na Bronze: já explodido (uma linha por chave).** Os dois arquivos são um único objeto JSON multiline em que as **chaves são dados** (`{"5812": "Eating Places…", …}` e `{"target": {"<id_transacao>": "Yes", …}}`). Lidos com schema explícito `MAP<STRING, STRING>` (sem inferência, que criaria um campo por chave) e transformados com `explode` em linhas (`mcc`, `descricao`; `transaction_id`, `is_fraud`).
+- Alternativa descartada: guardar o `MAP` como chegou, numa única linha. Para a fraude, seria uma linha com um mapa de milhões de entradas: um valor que só uma task processa, sem paralelismo, em toda consulta.
+- Não fere a regra "dado como chegou": a regra protege o **conteúdo** (nada é limpo, tipado ou descartado), e não a **forma**. Transformar um objeto JSON em linhas é o mesmo tipo de mapeamento estrutural que já acontece ao ler JSON Lines em colunas.
