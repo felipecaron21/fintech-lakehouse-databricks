@@ -19,3 +19,20 @@ AS SELECT
     _arquivo_origem,
     _ingerido_em
 FROM STREAM(fintech_dev.bronze.raw_transacoes)
+
+
+-- COMMAND ----------
+
+CREATE OR REFRESH STREAMING TABLE transacoes_validadas (
+    CONSTRAINT id_preenchido EXPECT (id IS NOT NULL) ON VIOLATION DROP ROW,
+    CONSTRAINT valor_preenchido EXPECT (valor IS NOT NULL) ON VIOLATION DROP ROW,
+    CONSTRAINT data_preenchida EXPECT (data_transacao IS NOT NULL) ON VIOLATION DROP ROW,
+    CONSTRAINT use_chip_valido EXPECT (use_chip IN ('Online Transaction', 'Swipe Transaction', 'Chip Transaction')) ON VIOLATION DROP ROW,
+    CONSTRAINT sem_dado_resgatado EXPECT (_rescued_data IS NULL),
+    CONSTRAINT zip_ausente_justificado EXPECT (merchant_zip IS NOT NULL 
+        OR use_chip = 'Online Transaction'
+        OR COALESCE(LENGTH(merchant_state), 0) > 2)
+)
+COMMENT 'tabela de transacoes com regras e validacoes'
+AS SELECT *
+FROM STREAM(transacoes_tipadas)
