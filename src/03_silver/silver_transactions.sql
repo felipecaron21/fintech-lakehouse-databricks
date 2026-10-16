@@ -1,4 +1,9 @@
 -- Databricks notebook source
+-- MAGIC %md
+-- MAGIC ### Tipagem e Estrutura
+
+-- COMMAND ----------
+
 CREATE OR REFRESH STREAMING TABLE transacoes_tipadas
 COMMENT 'tabela de transacoes tipada e estruturada'
 AS SELECT
@@ -23,6 +28,11 @@ FROM STREAM(fintech_dev.bronze.raw_transacoes)
 
 -- COMMAND ----------
 
+-- MAGIC %md
+-- MAGIC ### Regras e Validação
+
+-- COMMAND ----------
+
 CREATE OR REFRESH STREAMING TABLE transacoes_validadas (
     CONSTRAINT id_preenchido EXPECT (id IS NOT NULL) ON VIOLATION DROP ROW,
     CONSTRAINT valor_preenchido EXPECT (valor IS NOT NULL) ON VIOLATION DROP ROW,
@@ -36,3 +46,28 @@ CREATE OR REFRESH STREAMING TABLE transacoes_validadas (
 COMMENT 'tabela de transacoes com regras e validacoes'
 AS SELECT *
 FROM STREAM(transacoes_tipadas)
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ### Quarentena
+
+-- COMMAND ----------
+
+CREATE OR REFRESH STREAMING TABLE transacoes_quarentena
+COMMENT 'tabela de quarentena das transacoes que cairam nas regras de DROP'
+AS SELECT
+    *,
+    CASE
+        WHEN id IS NULL THEN 'id_nulo'
+        WHEN valor IS NULL THEN 'valor_nulo'
+        WHEN data_transacao IS NULL THEN 'data_nulo'
+        WHEN use_chip IS NULL
+            OR use_chip NOT IN ('Online Transaction', 'Swipe Transaction', 'Chip Transaction') THEN 'use_chip_accepted_values'
+    END AS motivo
+FROM STREAM(transacoes_tipadas)
+WHERE id IS NULL
+    OR valor IS NULL
+    OR data_transacao IS NULL
+    OR use_chip IS NULL
+    OR use_chip NOT IN ('Online Transaction', 'Swipe Transaction', 'Chip Transaction')
