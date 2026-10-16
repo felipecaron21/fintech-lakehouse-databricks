@@ -71,3 +71,19 @@ WHERE id IS NULL
     OR data_transacao IS NULL
     OR use_chip IS NULL
     OR use_chip NOT IN ('Online Transaction', 'Swipe Transaction', 'Chip Transaction')
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ### Deduplicando com AUTO CDC
+
+-- COMMAND ----------
+
+CREATE OR REFRESH STREAMING TABLE transacoes
+COMMENT 'tabela de transacoes deduplicada por id';
+
+CREATE FLOW fluxo_transacoes AS AUTO CDC INTO transacoes
+FROM STREAM(transacoes_validadas)
+KEYS (id)
+SEQUENCE BY (_ingerido_em)
+STORED AS SCD TYPE 1;
