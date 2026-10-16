@@ -75,12 +75,12 @@ WHERE id IS NULL
 -- COMMAND ----------
 
 -- MAGIC %md
--- MAGIC ### Deduplicando com AUTO CDC
+-- MAGIC ### Deduplicando com AUTO CDC + SCD TYPE 1
 
 -- COMMAND ----------
 
 CREATE OR REFRESH STREAMING TABLE transacoes
-COMMENT 'tabela de transacoes deduplicada por id';
+COMMENT 'tabela de transacoes';
 
 CREATE FLOW fluxo_transacoes AS AUTO CDC INTO transacoes
 FROM STREAM(transacoes_validadas)
