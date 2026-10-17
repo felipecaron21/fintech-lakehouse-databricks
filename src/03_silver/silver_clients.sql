@@ -4,8 +4,8 @@
 
 -- COMMAND ----------
 
-CREATE OR REFRESH STREAMING TABLE clientes_tipadas
-COMMENT 'tabela de cliente tipada e estruturada'
+CREATE TEMPORARY VIEW clientes_tipadas
+COMMENT 'view de cliente tipada e estruturada'
 AS SELECT
     id,
     name,
@@ -35,14 +35,14 @@ FROM STREAM(fintech_dev.bronze.raw_clientes)
 
 -- COMMAND ----------
 
-CREATE OR REFRESH STREAMING TABLE clientes_validadas (
+CREATE TEMPORARY VIEW clientes_validadas (
     CONSTRAINT id_preenchido EXPECT (id IS NOT NULL) ON VIOLATION DROP ROW,
     CONSTRAINT range_credit_score EXPECT (credit_score BETWEEN 300 AND 850),
     CONSTRAINT gender_valido EXPECT (gender IN ('Male', 'Female')),
     CONSTRAINT data_nascimento_preenchido EXPECT (data_nascimento IS NOT NULL),
     CONSTRAINT sem_dado_resgatado EXPECT (_rescued_data IS NULL)
 )
-COMMENT 'tabela de clientes com regras e validacoes'
+COMMENT 'view de clientes com regras e validacoes'
 AS SELECT *
 FROM STREAM(clientes_tipadas)
 
