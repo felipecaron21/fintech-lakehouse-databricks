@@ -4,8 +4,8 @@
 
 -- COMMAND ----------
 
-CREATE OR REFRESH MATERIALIZED VIEW fraud_label_tipadas
-COMMENT 'tabela de fraude tipada e estruturada'
+CREATE TEMPORARY VIEW fraud_label_tipadas
+COMMENT 'view de fraude tipada e estruturada'
 AS SELECT
     transaction_id,
     CAST(is_fraud AS BOOLEAN) AS is_fraud,
