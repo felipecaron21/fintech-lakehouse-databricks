@@ -4,7 +4,7 @@
 
 -- COMMAND ----------
 
-CREATE OR REFRESH STREAMING TABLE transacoes_tipadas
+CREATE OR REFRESH PRIVATE STREAMING TABLE transacoes_tipadas
 COMMENT 'tabela de transacoes tipada e estruturada'
 AS SELECT
     t.id,
@@ -36,7 +36,7 @@ LEFT JOIN cartoes c
 
 -- COMMAND ----------
 
-CREATE OR REFRESH STREAMING TABLE transacoes_validadas (
+CREATE TEMPORARY VIEW transacoes_validadas (
     CONSTRAINT id_preenchido EXPECT (id IS NOT NULL) ON VIOLATION DROP ROW,
     CONSTRAINT valor_preenchido EXPECT (valor IS NOT NULL) ON VIOLATION DROP ROW,
     CONSTRAINT data_preenchida EXPECT (data_transacao IS NOT NULL) ON VIOLATION DROP ROW,
@@ -47,7 +47,7 @@ CREATE OR REFRESH STREAMING TABLE transacoes_validadas (
         OR COALESCE(LENGTH(merchant_state), 0) > 2),
     CONSTRAINT cartao_existente EXPECT (cartao_existe = true) ON VIOLATION DROP ROW
 )
-COMMENT 'tabela de transacoes com regras e validacoes'
+COMMENT 'view de transacoes com regras e validacoes'
 AS SELECT *
 FROM STREAM(transacoes_tipadas)
 
