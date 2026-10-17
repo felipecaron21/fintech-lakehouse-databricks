@@ -4,8 +4,8 @@
 
 -- COMMAND ----------
 
-CREATE OR REFRESH STREAMING TABLE cartoes_tipadas
-COMMENT 'tabela de cartoes tipada e estruturada'
+CREATE TEMPORARY VIEW cartoes_tipadas
+COMMENT 'view de cartoes tipada e estruturada'
 AS SELECT
     id,
     client_id,
@@ -31,13 +31,13 @@ FROM STREAM(fintech_dev.bronze.raw_cartoes)
 
 -- COMMAND ----------
 
-CREATE OR REFRESH STREAMING TABLE cartoes_validadas (
+CREATE TEMPORARY VIEW cartoes_validadas (
     CONSTRAINT id_preenchido EXPECT (id IS NOT NULL) ON VIOLATION DROP ROW,
     CONSTRAINT card_type_valido EXPECT (card_type IN ('Credit', 'Debit', 'Debit (Prepaid)')),
     CONSTRAINT data_expiracao_valida EXPECT (data_expiracao IS NOT NULL),
     CONSTRAINT data_abertura_valida EXPECT (data_abertura_conta IS NOT NULL)
 )
-COMMENT 'tabela de cartoes com regras e validacoes'
+COMMENT 'view de cartoes com regras e validacoes'
 AS SELECT *
 FROM STREAM(cartoes_tipadas)
 
