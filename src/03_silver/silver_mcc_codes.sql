@@ -4,8 +4,8 @@
 
 -- COMMAND ----------
 
-CREATE OR REFRESH MATERIALIZED VIEW mcc_codes_tipadas
-COMMENT 'tabela de mcc codes tipada e estruturada'
+CREATE TEMPORARY VIEW mcc_codes_tipadas
+COMMENT 'view de mcc codes tipada e estruturada'
 AS SELECT
     mcc,
     descricao,
